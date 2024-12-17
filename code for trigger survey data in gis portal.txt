@@ -1,0 +1,113 @@
+CREATE OR REPLACE PROCEDURE refresh_gopms_collection_data_mv()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Drop the materialized view if it already exists
+    IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'gopms_collection_data_mv') THEN
+        DROP MATERIALIZED VIEW gopms_collection_data_mv;
+    END IF;
+    
+    -- Create the materialized view again
+    CREATE MATERIALIZED VIEW gopms_collection_data_mv AS
+    WITH geom_converted AS (
+        SELECT
+            g.id,
+            g.created_at,
+            g.work_year,
+            g.work_title,
+            g.scheme,
+            g.approved_amount,
+            g.implementing_agency,
+            g.taluka,
+            g.work_status,
+            g.field_officer_name,
+            g.designation,
+            g.mobile_number,
+            g.status,
+            g.longitude,
+            g.latitude,
+			g.photo_1,
+			g.photo_2,
+            g.goem_type,
+            g.geom_status,
+            g.user_id,
+    
+            -- Handle Point and LineString cases based on geom_status content
+            CASE
+                -- If geom_status contains one point and type is Point
+                WHEN g.goem_type = 'Point' AND jsonb_array_length(g.geom_status::jsonb) = 1 THEN
+                    ST_SetSRID(ST_MakePoint(
+                        (point_data->>'longitude')::float,
+                        (point_data->>'latitude')::float
+                    ), 4326)
+                
+                -- If geom_status contains multiple points and type is LineString
+                WHEN g.goem_type = 'LineString' AND jsonb_array_length(g.geom_status::jsonb) > 1 THEN
+                    ST_SetSRID(ST_MakeLine(
+                        ARRAY(
+                            SELECT ST_MakePoint(
+                                (point->>'longitude')::float,
+                                (point->>'latitude')::float
+                            )
+                            FROM jsonb_array_elements(g.geom_status::jsonb) AS point
+                        )
+                    ), 4326)
+                
+                -- If geom_status is NULL or empty, return NULL geometry
+                ELSE
+                    NULL
+            END AS geom
+        FROM public.gopms_collection_data g
+        LEFT JOIN LATERAL jsonb_array_elements(g.geom_status::jsonb) AS point_data ON true
+        WHERE g.geom_status IS NOT NULL
+          AND g.geom_status != '[]'  -- Ensure geom_status is not an empty array
+          AND (g.goem_type = 'Point' OR g.goem_type = 'LineString')
+    )
+    SELECT
+        id,
+        created_at,
+        work_year,
+        work_title,
+        scheme,
+        approved_amount,
+        implementing_agency,
+        taluka,
+        work_status,
+        field_officer_name,
+        designation,
+        mobile_number,
+        status,
+        longitude,
+        latitude,
+		photo_1,
+		photo_2,
+        goem_type,
+        geom_status,
+        user_id,
+        geom
+    FROM geom_converted;
+END;
+$$;
+
+
+
+
+
+
+CREATE OR REPLACE FUNCTION trigger_refresh_gopms_collection_data_mv()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Call the procedure to refresh the materialized view
+    PERFORM refresh_gopms_collection_data_mv();
+    RETURN NEW;  -- Return the updated row (standard for AFTER triggers)
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE TRIGGER refresh_gopms_collection_data_mv_trigger
+AFTER INSERT OR UPDATE ON public.gopms_collection_data
+FOR EACH STATEMENT
+EXECUTE FUNCTION trigger_refresh_gopms_collection_data_mv();
+
+
+
